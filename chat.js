@@ -21,9 +21,10 @@
   var ENDPOINT = (CFG.endpoint || "").replace(/\/+$/, "");
   var TITRE = CFG.titre || "Contact";
   var ACCROCHE = CFG.accroche || "Ecris-nous, ta reponse arrive ici.";
-  var POLL_MS = 4000;
+  var POLL_OPEN_MS = 5000;   // chat ouvert : verification rapide
+  var POLL_IDLE_MS = 25000;  // chat ferme mais onglet visible : verification lente (pastille)
   var STORE_CONV = "msgr_conv";
-  var STORE_SEEN = "msgr_seen";
+  var STORE_SEEN = "msgr_seq2"; // curseur = numero de la derniere reponse recue (nouveau schema)
   var STORE_LOG = "msgr_log";
 
   /* --------- identite anonyme --------- */
@@ -171,24 +172,25 @@
       var r = await fetch(ENDPOINT + "/api/poll?conv=" + CONV + "&after=" + lastSeen);
       if (!r.ok) return;
       var data = await r.json();
-      var incoming = (data.messages || []).filter(function (m) { return m.from === "support"; });
-      // Anti-doublon : ne garder que les messages qu'on n'a pas deja en memoire.
+      // Le serveur ne renvoie QUE les reponses du support plus recentes que
+      // notre curseur, chacune numerotee (seq). Anti-doublon par ce numero.
+      var incoming = data.messages || [];
       var known = {};
-      LOG.forEach(function (m) { known[sig(m)] = true; });
-      var fresh = incoming.filter(function (m) { return !known[sig(m)]; });
+      LOG.forEach(function (m) { if (m.seq != null) known[m.seq] = true; });
+      var fresh = incoming.filter(function (m) { return m.seq == null || !known[m.seq]; });
       if (fresh.length) {
         fresh.forEach(function (m) {
-          LOG.push({ from: "support", text: m.text, ts: m.ts });
+          LOG.push({ from: "support", text: m.text, ts: m.ts, seq: m.seq });
         });
         LOG.sort(function (a, b) { return a.ts - b.ts; });
         saveLog(LOG);
         render();
         setBadge(fresh.length);
       }
-      // On avance toujours le curseur, meme si rien de neuf, pour ne pas re-telecharger.
-      if (data.messages && data.messages.length) {
-        var maxTs = Math.max.apply(null, data.messages.map(function (m) { return m.ts; }));
-        lastSeen = Math.max(lastSeen, maxTs);
+      // On avance le curseur au compteur du serveur, meme si rien de neuf,
+      // pour ne pas re-demander les memes messages.
+      if (typeof data.count === "number" && data.count > lastSeen) {
+        lastSeen = data.count;
         localStorage.setItem(STORE_SEEN, String(lastSeen));
       }
     } catch (e) { /* hors ligne : on reessaiera */ } finally {
@@ -202,8 +204,13 @@
     setBadge(0);
     ta.focus();
     body.scrollTop = body.scrollHeight;
+    poll();          // verif immediate a l'ouverture
+    scheduleNext();  // passe en cadence rapide
   }
-  function close() { panel.classList.remove("open"); }
+  function close() {
+    panel.classList.remove("open");
+    scheduleNext();  // repasse en cadence lente
+  }
 
   btn.addEventListener("click", function () {
     panel.classList.contains("open") ? close() : open();
@@ -228,7 +235,23 @@
   // Ouverture automatique (utile sur une page de contact dediee)
   if (CFG.autoOpen) open();
 
-  // Polling
-  poll();
-  setInterval(poll, POLL_MS);
+  /* --------- planification econome du polling --------- */
+  // On n'interroge le serveur QUE si l'onglet est visible. Rapide quand le
+  // chat est ouvert, lent sinon (juste pour la pastille). Rien quand l'onglet
+  // est en arriere-plan : ca evite de consommer le quota pour rien.
+  var pollTimer = null;
+  function scheduleNext() {
+    clearTimeout(pollTimer);
+    var delay = panel.classList.contains("open") ? POLL_OPEN_MS : POLL_IDLE_MS;
+    pollTimer = setTimeout(tick, delay);
+  }
+  async function tick() {
+    if (!document.hidden) { await poll(); }
+    scheduleNext();
+  }
+  if (!document.hidden) poll(); // premier coup pour rattraper une reponse recue absent
+  scheduleNext();
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) { poll(); scheduleNext(); }
+  });
 })();
