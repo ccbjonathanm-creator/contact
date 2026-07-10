@@ -160,28 +160,40 @@
     } catch (e) { /* silencieux : le message reste affiche localement */ }
   }
 
+  var polling = false;
+  function sig(m) { return m.from + "|" + m.ts + "|" + m.text; }
+
   async function poll() {
     if (!haveEndpoint()) return;
+    if (polling) return; // une seule requete a la fois (evite les doublons quand le reseau rame)
+    polling = true;
     try {
       var r = await fetch(ENDPOINT + "/api/poll?conv=" + CONV + "&after=" + lastSeen);
       if (!r.ok) return;
       var data = await r.json();
       var incoming = (data.messages || []).filter(function (m) { return m.from === "support"; });
-      if (incoming.length) {
-        incoming.forEach(function (m) {
+      // Anti-doublon : ne garder que les messages qu'on n'a pas deja en memoire.
+      var known = {};
+      LOG.forEach(function (m) { known[sig(m)] = true; });
+      var fresh = incoming.filter(function (m) { return !known[sig(m)]; });
+      if (fresh.length) {
+        fresh.forEach(function (m) {
           LOG.push({ from: "support", text: m.text, ts: m.ts });
         });
         LOG.sort(function (a, b) { return a.ts - b.ts; });
         saveLog(LOG);
+        render();
+        setBadge(fresh.length);
+      }
+      // On avance toujours le curseur, meme si rien de neuf, pour ne pas re-telecharger.
+      if (data.messages && data.messages.length) {
         var maxTs = Math.max.apply(null, data.messages.map(function (m) { return m.ts; }));
         lastSeen = Math.max(lastSeen, maxTs);
         localStorage.setItem(STORE_SEEN, String(lastSeen));
-        render();
-        setBadge(incoming.length);
-      } else if (data.now) {
-        // rien de nouveau
       }
-    } catch (e) { /* hors ligne : on reessaiera */ }
+    } catch (e) { /* hors ligne : on reessaiera */ } finally {
+      polling = false;
+    }
   }
 
   /* --------- interactions --------- */
